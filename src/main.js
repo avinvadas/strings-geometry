@@ -7,6 +7,7 @@ import { createStringsGeometry, STRINGS } from './geometry.js';
 import { SHAPES, orientOutward } from './shapes.js';
 import { createBodyMaterial, createStringMaterial, uniforms } from './material.js';
 import { THEMES } from './theme.js';
+import { makeEnvironment } from './environment.js';
 import { makeBackground, withGrain, BG_DEFAULTS, setBackgroundParam } from './background.js';
 
 const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -15,6 +16,8 @@ renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
 await renderer.init();
 
+const pmrem = new THREE.PMREMGenerator(renderer);
+let envTarget = null;
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x000000, 0.25);
 
@@ -50,6 +53,9 @@ const params = {
   complexity: SHAPES['Cylindrical helix'].complexity.value,
   width: SHAPES['Cylindrical helix'].defaultWidth,
   coverage: SHAPES['Cylindrical helix'].defaultCoverage,
+  environment: 1,
+  envRotation: 0,
+  directLight: 0.6,
   endpoints: STRINGS.endpoints,
   seed: STRINGS.seed,
   faceSeed: 3,
@@ -90,6 +96,10 @@ function flush(p) {
   markDeparting(sg.userData.departing);
 }
 
+function applyLights() {                        // direct lights are scaled down: the environment now does most of the work
+  const t = THEMES[theme], k = params.directLight;
+  hemi.intensity = t.hemi[2] * k; key.intensity = t.key[1] * k; rimLight.intensity = t.rim[1] * k;
+}
 // ---- theme (dark / bright) -------------------------------------------------
 let theme;
 function applyTheme(name) {
@@ -97,9 +107,11 @@ function applyTheme(name) {
   scene.backgroundNode = makeBackground(name);
   bgBright.show(name === 'light'); bgDark.show(name === 'dark');
   scene.fog.color.setHex(t.fog); scene.fog.density = t.fogDensity;
-  hemi.color.setHex(t.hemi[0]); hemi.groundColor.setHex(t.hemi[1]); hemi.intensity = t.hemi[2];
-  key.color.setHex(t.key[0]); key.intensity = t.key[1];
-  rimLight.color.setHex(t.rim[0]); rimLight.intensity = t.rim[1];
+  hemi.color.setHex(t.hemi[0]); hemi.groundColor.setHex(t.hemi[1]);
+  key.color.setHex(t.key[0]); rimLight.color.setHex(t.rim[0]);
+  applyLights();
+  if (envTarget) envTarget.dispose();
+  envTarget = makeEnvironment(pmrem, name); scene.environment = envTarget.texture;     // image-based lighting
   body.material.dispose(); bodyBack.material.dispose(); strings.material.dispose();
   body.material = createBodyMaterial(name);
   bodyBack.material = createBodyMaterial(name, THREE.BackSide);
@@ -138,6 +150,12 @@ const seedCtl = strs.add(params, 'seed', 0, 9999, 1).name('Seed').onChange(() =>
 strs.add({ randomize() { seedCtl.setValue(Math.floor(Math.random() * 10000)); } }, 'randomize').name('Randomize seed');
 
 
+const lighting = gui.addFolder('Lighting');
+lighting.add(params, 'environment', 0, 4, 0.01).name('Environment light').onChange((v) => { scene.environmentIntensity = v; });
+lighting.add(params, 'envRotation', 0, 360, 1).name('Environment rotation').onChange((v) => { scene.environmentRotation.y = THREE.MathUtils.degToRad(v); });
+lighting.add(params, 'directLight', 0, 2, 0.01).name('Direct lights').onChange(() => applyLights());
+lighting.close();
+
 // ---- background controls (only the folder for the current mode is shown) ----
 const bgParams = { ...BG_DEFAULTS };
 function bgFolder(title, rows) {
@@ -174,6 +192,7 @@ function settingsSnapshot() {
     ...(def.complexity ? { [def.complexity.label.toLowerCase()]: params.complexity } : {}),
     ...(def.usesWidth ? { width: r3(params.width) } : {}),
     cellCoverage: r3(params.coverage),
+    lighting: { environmentLight: r3(params.environment), environmentRotation: params.envRotation, directLights: r3(params.directLight) },
     visibilitySeed: params.faceSeed,
     strings: {
       endpointsPerAnchor: params.endpoints, anchorChance: r3(params.departChance), anchorsOnlyOnFabric: params.fabricOnly,
