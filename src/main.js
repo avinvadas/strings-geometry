@@ -46,9 +46,10 @@ const bloomed = scenePass.add(bloom(scenePass, 0.3, 0.4, 0.55));
 const params = {
   bright: true,
   shape: 'Cylindrical helix',
+  subdivision: SHAPES['Cylindrical helix'].subdivision.value,
   complexity: SHAPES['Cylindrical helix'].complexity.value,
-  width: 1 / 3,
-  density: 8,
+  width: SHAPES['Cylindrical helix'].defaultWidth,
+  coverage: SHAPES['Cylindrical helix'].defaultCoverage,
   endpoints: STRINGS.endpoints,
   seed: STRINGS.seed,
   faceSeed: 3,
@@ -80,7 +81,7 @@ function markDeparting(cells) {
 }
 function flush(p) {
   if (p.has('body')) {
-    const built = SHAPES[params.shape].build({ complexity: params.complexity, width: params.width, faceSeed: params.faceSeed, fabricOnly: params.fabricOnly });
+    const built = SHAPES[params.shape].build({ subdivision: params.subdivision, complexity: params.complexity ?? 1, width: params.width, coverage: params.coverage, faceSeed: params.faceSeed, fabricOnly: params.fabricOnly });
     swap(body, orientOutward(built.body)); anchors = built.anchors;
     bodyBack.geometry = body.geometry;                       // shared; only `body` owns/disposes it
   }
@@ -113,18 +114,21 @@ function applyTheme(name) {
 const gui = new GUI({ title: 'Controls' });
 const bright = gui.add(params, 'bright').name('Bright mode').onChange((v) => applyTheme(v ? 'light' : 'dark'));
 gui.add(params, 'shape', Object.keys(SHAPES)).name('Shape').onChange((name) => {
-  const c = SHAPES[name].complexity;
-  chanceCtl.setValue(SHAPES[name].departChance);
-  uniforms.cellMode.value = SHAPES[name].cells ? 1 : 0;
-  if (SHAPES[name].defaultWidth) widthCtl.setValue(SHAPES[name].defaultWidth);
-  complexity.name(c.label).min(c.min).max(c.max).setValue(c.value);   // setValue triggers the rebuild
+  const def = SHAPES[name], sub = def.subdivision, c = def.complexity;
+  chanceCtl.setValue(def.departChance);
+  widthCtl.setValue(def.defaultWidth); widthCtl.show(def.usesWidth);
+  coverageCtl.setValue(def.defaultCoverage);
+  if (c) { complexityCtl.name(c.label).min(c.min).max(c.max).step(c.step ?? 1).setValue(c.value); }
+  complexityCtl.show(!!c);
+  subdivisionCtl.name(sub.label).min(sub.min).max(sub.max).step(sub.step).setValue(sub.value);   // setValue triggers the rebuild
 });
-const complexity = gui.add(params, 'complexity', 2, 8, 1).name('Turns').onChange(() => schedule('body'));
+const subdivisionCtl = gui.add(params, 'subdivision', 12, 56, 2).name(SHAPES[params.shape].subdivision.label).onChange(() => schedule('body'));
+const complexityCtl = gui.add(params, 'complexity', 2, 8, 1).name('Turns').onChange(() => schedule('body'));
 const surface = gui.addFolder('Surface');
-const widthCtl = surface.add(params, 'width', 0.05, 0.95, 0.01).name('Width / cell coverage').onChange(() => schedule('body'));
+const widthCtl = surface.add(params, 'width', 0.05, 1, 0.01).name('Width (band / edges)').onChange(() => schedule('body'));
+const coverageCtl = surface.add(params, 'coverage', 0.05, 1, 0.01).name('Cell coverage').onChange(() => schedule('body'));
 const faceSeedCtl = surface.add(params, 'faceSeed', 0, 9999, 1).name('Visibility seed').onChange(() => schedule('body'));
 surface.add({ randomize() { faceSeedCtl.setValue(Math.floor(Math.random() * 10000)); } }, 'randomize').name('Randomize visibility');
-surface.add(params, 'density', 2, 24, 0.5).name('Texture density').onChange((v) => { uniforms.density.value = v; });
 const strs = gui.addFolder('Strings');
 strs.add(params, 'endpoints', 1, 12, 1).name('Endpoints per anchor').onChange(() => schedule('strings'));
 strs.add(uniforms.inkStrength, 'value', 0.05, 1, 0.01).name('Bright: string ink');
@@ -157,6 +161,41 @@ const bgDark = bgFolder('Background (dark)', [
   ['frost', 'Frost', 0, 0.3, 0.005], ['darkFrost', 'Frost colour'],
   ['grainDark', 'Grain (over scene)', 0, 0.2, 0.0025], ['drift', 'Drift speed', 0, 4, 0.05]]);
 
+
+// ---- copy the exact settings (both modes) as JSON, to paste into a prompt ----
+const r3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v);
+function settingsSnapshot() {
+  const pick = (keys) => Object.fromEntries(keys.map((k) => [k, r3(bgParams[k])]));
+  const def = SHAPES[params.shape];
+  return {
+    mode: params.bright ? 'bright' : 'dark',
+    shape: params.shape,
+    subdivision: params.subdivision,
+    ...(def.complexity ? { [def.complexity.label.toLowerCase()]: params.complexity } : {}),
+    ...(def.usesWidth ? { width: r3(params.width) } : {}),
+    cellCoverage: r3(params.coverage),
+    visibilitySeed: params.faceSeed,
+    strings: {
+      endpointsPerAnchor: params.endpoints, anchorChance: r3(params.departChance), anchorsOnlyOnFabric: params.fabricOnly,
+      seed: params.seed, brightInkStrength: r3(uniforms.inkStrength.value),
+    },
+    background: {
+      bright: pick(['gradient', 'brightA', 'brightB', 'lift', 'vignette', 'grainBright']),
+      dark: pick(['darkBase', 'blue', 'darkBlue', 'teal', 'darkTeal', 'violet', 'darkViolet', 'frost', 'darkFrost', 'grainDark', 'drift']),
+    },
+    camera: { position: camera.position.toArray().map(r3), target: controls.target.toArray().map(r3) },
+  };
+}
+const copyCtl = gui.add({
+  async copy() {
+    const text = JSON.stringify(settingsSnapshot(), null, 2);
+    try { await navigator.clipboard.writeText(text); }
+    catch { const ta = Object.assign(document.createElement('textarea'), { value: text }); document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+    copyCtl.name('Copied!'); setTimeout(() => copyCtl.name('Copy settings'), 1400);
+    console.log(text);
+  },
+}, 'copy').name('Copy settings');
+gui.$children.insertBefore(copyCtl.domElement, gui.$children.firstChild);   // show it first in the panel
 addEventListener('keydown', (e) => { if (e.key === 't' || e.key === 'T') bright.setValue(!params.bright); });
 let saved; try { saved = localStorage.getItem('theme'); } catch {}
 params.bright = saved !== 'dark'; bright.updateDisplay();      // default: bright

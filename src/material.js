@@ -4,7 +4,7 @@ import { Fn, vec3, float, color, time, uv, attribute, positionLocal, normalLocal
          mix, uniform, pow, abs, sin, cos, dot, saturate, smoothstep } from 'three/tsl';
 
 export const INK = 0x1f3040;   // light-mode material colour
-export const uniforms = { density: uniform(8), cellMode: uniform(0), inkStrength: uniform(0.55) };   // density: cells per unit; cellMode 1: one cell per hexagon; inkStrength: bright-mode string ink
+export const uniforms = { density: uniform(8), cellMode: uniform(1), inkStrength: uniform(0.55) };   // density: cells per unit; cellMode 1: one cell per hexagon; inkStrength: bright-mode string ink
 
 const fresnel = (p) => pow(float(1).sub(saturate(dot(normalView, positionViewDirection))), p);
 const hueRamp = (h) => vec3(sin(h.mul(6.283)), sin(h.mul(6.283).add(2.1)), sin(h.mul(6.283).add(4.2))).mul(0.5).add(0.5);
