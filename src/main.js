@@ -1,0 +1,175 @@
+import * as THREE from 'three/webgpu';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { pass, renderOutput } from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+import GUI from 'three/addons/libs/lil-gui.module.min.js';
+import { createStringsGeometry, STRINGS } from './geometry.js';
+import { SHAPES, orientOutward } from './shapes.js';
+import { createBodyMaterial, createStringMaterial, uniforms } from './material.js';
+import { THEMES } from './theme.js';
+import { makeBackground, withGrain, BG_DEFAULTS, setBackgroundParam } from './background.js';
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000000, 0.25);
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 0.6, 5);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const hemi = new THREE.HemisphereLight(); scene.add(hemi);
+const key = new THREE.DirectionalLight(); key.position.set(2, 3, 2); scene.add(key);
+const rimLight = new THREE.DirectionalLight(); rimLight.position.set(-3, 0.5, -2); scene.add(rimLight);
+
+// Far-side surface (back faces) -> strings -> near-side surface (front faces), so strings
+// read as inside the shape: blurred by the near glass, in front of the far glass.
+const bodyBack = new THREE.Mesh(new THREE.BufferGeometry(), createBodyMaterial('dark', THREE.BackSide));
+const body = new THREE.Mesh(new THREE.BufferGeometry(), createBodyMaterial());
+const strings = new THREE.Mesh(new THREE.BufferGeometry(), createStringMaterial());
+bodyBack.renderOrder = 0; strings.renderOrder = 1; body.renderOrder = 2;
+const mesh = new THREE.Group();
+mesh.add(bodyBack, strings, body);
+scene.add(mesh);
+
+const post = new THREE.RenderPipeline(renderer);
+const scenePass = pass(scene, camera);
+post.outputColorTransform = false;           // we convert with renderOutput() ourselves, so grain is added in display space
+const bloomed = scenePass.add(bloom(scenePass, 0.3, 0.4, 0.55));
+
+// ---- parameters + rebuilding ----------------------------------------------
+const params = {
+  bright: true,
+  shape: 'Cylindrical helix',
+  complexity: SHAPES['Cylindrical helix'].complexity.value,
+  width: 1 / 3,
+  density: 8,
+  endpoints: STRINGS.endpoints,
+  seed: STRINGS.seed,
+  faceSeed: 3,
+  fabricOnly: true,
+  departChance: STRINGS.departChance,
+};
+let anchors = [], pending = new Set();
+function schedule(what) {                       // coalesce slider drags into one rebuild per frame
+  if (!pending.size) requestAnimationFrame(() => { const p = pending; pending = new Set(); flush(p); });
+  pending.add(what);
+}
+function swap(mesh, geometry) {
+  if (!geometry.attributes.aCell && geometry.attributes.position)       // material reads aCell on every body
+    geometry.setAttribute('aCell', new THREE.Float32BufferAttribute(new Float32Array(geometry.attributes.position.count * 3), 3));
+  if (!geometry.attributes.aDir && geometry.attributes.position)
+    geometry.setAttribute('aDir', new THREE.Float32BufferAttribute(new Float32Array(geometry.attributes.position.count * 3), 3));
+  mesh.geometry.dispose(); mesh.geometry = geometry;
+}
+// cells that send strings get aCell.z = 1, so the material can tint them like the strings
+function markDeparting(cells) {
+  const attr = body.geometry.attributes.aCell, ranges = body.geometry.userData.cellRanges;
+  if (!attr || attr.itemSize !== 3) return;
+  for (let i = 2; i < attr.array.length; i += 3) attr.array[i] = 0;
+  if (ranges && cells) for (const c of cells) {
+    const r = ranges.get(c); if (!r) continue;
+    for (let v = r[0]; v < r[0] + r[1]; v++) attr.array[v * 3 + 2] = 1;
+  }
+  attr.needsUpdate = true;
+}
+function flush(p) {
+  if (p.has('body')) {
+    const built = SHAPES[params.shape].build({ complexity: params.complexity, width: params.width, faceSeed: params.faceSeed, fabricOnly: params.fabricOnly });
+    swap(body, orientOutward(built.body)); anchors = built.anchors;
+    bodyBack.geometry = body.geometry;                       // shared; only `body` owns/disposes it
+  }
+  const sg = createStringsGeometry(anchors, { seed: params.seed, endpoints: params.endpoints, departChance: params.departChance });
+  swap(strings, sg);
+  markDeparting(sg.userData.departing);
+}
+
+// ---- theme (dark / bright) -------------------------------------------------
+let theme;
+function applyTheme(name) {
+  theme = name; const t = THEMES[name];
+  scene.backgroundNode = makeBackground(name);
+  bgBright.show(name === 'light'); bgDark.show(name === 'dark');
+  scene.fog.color.setHex(t.fog); scene.fog.density = t.fogDensity;
+  hemi.color.setHex(t.hemi[0]); hemi.groundColor.setHex(t.hemi[1]); hemi.intensity = t.hemi[2];
+  key.color.setHex(t.key[0]); key.intensity = t.key[1];
+  rimLight.color.setHex(t.rim[0]); rimLight.intensity = t.rim[1];
+  body.material.dispose(); bodyBack.material.dispose(); strings.material.dispose();
+  body.material = createBodyMaterial(name);
+  bodyBack.material = createBodyMaterial(name, THREE.BackSide);
+  strings.material = createStringMaterial(name);
+  post.outputNode = withGrain(renderOutput(t.bloom ? bloomed : scenePass), name);   // grain on top of everything, after colour conversion
+  post.needsUpdate = true;
+  document.body.style.background = name === 'light' ? '#edebe4' : '#02060c';
+  try { localStorage.setItem('theme', name); } catch {}
+}
+
+// ---- control panel -----------------------------------------------------------
+const gui = new GUI({ title: 'Controls' });
+const bright = gui.add(params, 'bright').name('Bright mode').onChange((v) => applyTheme(v ? 'light' : 'dark'));
+gui.add(params, 'shape', Object.keys(SHAPES)).name('Shape').onChange((name) => {
+  const c = SHAPES[name].complexity;
+  chanceCtl.setValue(SHAPES[name].departChance);
+  uniforms.cellMode.value = SHAPES[name].cells ? 1 : 0;
+  if (SHAPES[name].defaultWidth) widthCtl.setValue(SHAPES[name].defaultWidth);
+  complexity.name(c.label).min(c.min).max(c.max).setValue(c.value);   // setValue triggers the rebuild
+});
+const complexity = gui.add(params, 'complexity', 2, 8, 1).name('Turns').onChange(() => schedule('body'));
+const surface = gui.addFolder('Surface');
+const widthCtl = surface.add(params, 'width', 0.05, 0.95, 0.01).name('Width / cell coverage').onChange(() => schedule('body'));
+const faceSeedCtl = surface.add(params, 'faceSeed', 0, 9999, 1).name('Visibility seed').onChange(() => schedule('body'));
+surface.add({ randomize() { faceSeedCtl.setValue(Math.floor(Math.random() * 10000)); } }, 'randomize').name('Randomize visibility');
+surface.add(params, 'density', 2, 24, 0.5).name('Texture density').onChange((v) => { uniforms.density.value = v; });
+const strs = gui.addFolder('Strings');
+strs.add(params, 'endpoints', 1, 12, 1).name('Endpoints per anchor').onChange(() => schedule('strings'));
+strs.add(uniforms.inkStrength, 'value', 0.05, 1, 0.01).name('Bright: string ink');
+const chanceCtl = strs.add(params, 'departChance', 0, 1, 0.01).name('Anchor chance').onChange(() => schedule('strings'));
+strs.add(params, 'fabricOnly').name('Anchors only on fabric').onChange(() => schedule('body'));
+const seedCtl = strs.add(params, 'seed', 0, 9999, 1).name('Seed').onChange(() => schedule('strings'));
+strs.add({ randomize() { seedCtl.setValue(Math.floor(Math.random() * 10000)); } }, 'randomize').name('Randomize seed');
+
+
+// ---- background controls (only the folder for the current mode is shown) ----
+const bgParams = { ...BG_DEFAULTS };
+function bgFolder(title, rows) {
+  const f = gui.addFolder(title);
+  for (const [key, label, min, max, step] of rows) {
+    const c = typeof BG_DEFAULTS[key] === 'string' ? f.addColor(bgParams, key) : f.add(bgParams, key, min, max, step);
+    c.name(label).onChange((v) => setBackgroundParam(key, v));
+  }
+  f.add({ reset() { f.reset(); } }, 'reset').name('Reset');
+  f.close();
+  return f;
+}
+const bgBright = bgFolder('Background (bright)', [
+  ['gradient', 'Gradient strength', 0, 2, 0.01], ['brightA', 'Colour, top-left'], ['brightB', 'Colour, bottom-right'],
+  ['lift', 'Light behind subject', 0, 1, 0.01], ['vignette', 'Vignette', 0, 0.4, 0.005], ['grainBright', 'Grain (over scene)', 0, 0.2, 0.0025]]);
+const bgDark = bgFolder('Background (dark)', [
+  ['darkBase', 'Base colour'],
+  ['blue', 'Blue field', 0, 1.5, 0.01], ['darkBlue', 'Blue colour'],
+  ['teal', 'Teal field', 0, 1.5, 0.01], ['darkTeal', 'Teal colour'],
+  ['violet', 'Violet field', 0, 1.5, 0.01], ['darkViolet', 'Violet colour'],
+  ['frost', 'Frost', 0, 0.3, 0.005], ['darkFrost', 'Frost colour'],
+  ['grainDark', 'Grain (over scene)', 0, 0.2, 0.0025], ['drift', 'Drift speed', 0, 4, 0.05]]);
+
+addEventListener('keydown', (e) => { if (e.key === 't' || e.key === 'T') bright.setValue(!params.bright); });
+let saved; try { saved = localStorage.getItem('theme'); } catch {}
+params.bright = saved !== 'dark'; bright.updateDisplay();      // default: bright
+applyTheme(params.bright ? 'light' : 'dark');
+flush(new Set(['body']));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  mesh.rotation.y += 0.002;
+  controls.update();
+  post.render();
+});
